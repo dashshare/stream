@@ -8,7 +8,7 @@ const io = require('socket.io')(http, {
 io.on('connection', (socket) => {
   socket.on('join-room', (roomId) => {
     socket.join(roomId);
-    console.log(`Thiết bị ${socket.id} đã vào phòng: ${roomId}`);
+    console.log(`ID ${socket.id} vào phòng: ${roomId}`);
   });
 
   socket.on('signal', (data) => {
@@ -17,4 +17,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-http.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+http.listen(PORT, () => console.log(`Server đang chạy...`));
