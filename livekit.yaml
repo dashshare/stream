@@ -4,7 +4,6 @@ rtc:
   port_range_start: 7860
   port_range_end: 7860
   tcp_port: 7860
-  allow_external_ice_lite: true
 keys: { "APID84apr8uo6Jj": "JVK8f0NZbdyfuFpvWyQdwGIgBcJtbfJf6e6EkuTlHhEH" }
 logging:
   level: info
