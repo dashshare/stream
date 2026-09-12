@@ -1,6 +1,0 @@
-port: 10000
-rtc:
-  use_external_ip: true
-keys: { "APID84apr8uo6Jj": "JVK8f0NZbdyfuFpvWyQdwGIgBcJtbfJf6e6EkuTlHhEH" }
-logging:
-  level: info
