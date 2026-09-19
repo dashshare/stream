@@ -1,108 +1,117 @@
 const express = require('express');
-const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 app.use(express.json());
 
-const KEY_SECRET = process.env.KEY_SECRET || "YOUR_SHARED_KEY_SECRET_HERE";
-const JWT_SECRET = process.env.JWT_SECRET || "YOUR_INTERNAL_JWT_SECRET_KEY";
-const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || "YOUR_DISCORD_BOT_TOKEN";
-const PORT = process.env.PORT || 3000;
+const TEMP_DIR = path.join(__dirname, 'temp_media');
+if (!fs.existsSync(TEMP_DIR)) {
+    fs.mkdirSync(TEMP_DIR, { recursive: true });
+}
 
-const activeSessions = new Map();
+const fileStore = new Map();
 
-app.post('/auth/token', async (req, res) => {
-    const { secret, guild_id } = req.body;
+app.post('/api/cache-media', async (req, res) => {
+    const { stream_url, duration, load_as_file } = req.body; 
 
-    if (!secret || secret !== KEY_SECRET) {
-        return res.status(403).json({ success: false, error: 'Unauthorized: Invalid Key Secret' });
+    if (!stream_url) {
+        return res.status(400).json({ success: false, message: 'Missing stream_url' });
     }
 
-    if (!guild_id) {
-        return res.status(400).json({ success: false, error: 'Missing guild_id' });
-    }
+    const songDuration = parseInt(duration) || 240;
+    const bufferSeconds = load_as_file ? 30 : 60;
+    const ttlSeconds = songDuration + bufferSeconds;
 
     try {
-        const discordRes = await axios.get(`https://discord.com/api/v10/guilds/${guild_id}`, {
+        const fileId = crypto.randomBytes(16).toString('hex');
+        const filePath = path.join(TEMP_DIR, `${fileId}.mp3`);
+
+        const response = await axios({
+            method: 'get',
+            url: stream_url,
+            responseType: 'stream',
+            timeout: 30000,
             headers: {
-                'Authorization': `Bot ${DISCORD_BOT_TOKEN}`
-            },
-            timeout: 5000
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
         });
 
-        if (discordRes.status !== 200 || !discordRes.data.id) {
-            return res.status(404).json({ success: false, error: 'Discord Guild not found' });
-        }
+        const writer = fs.createWriteStream(filePath);
+        response.data.pipe(writer);
 
-        const token = jwt.sign(
-            { 
-                guild_id: discordRes.data.id,
-                guild_name: discordRes.data.name,
-                timestamp: Date.now() 
-            },
-            JWT_SECRET,
-            { expiresIn: '5m' }
-        );
+        writer.on('finish', () => {
+            fileStore.set(fileId, {
+                filePath,
+                ttlSeconds,
+                isTimerStarted: false,
+                timeoutId: null
+            });
 
-        return res.json({ success: true, token });
+            const serverHost = 'https://' + req.get('host');
+            return res.json({
+                success: true,
+                media_id: fileId,
+                local_stream_url: `${serverHost}/media/${fileId}`
+            });
+        });
+
+        writer.on('error', (err) => {
+            console.error('[Download Error]:', err);
+            return res.status(500).json({ success: false, message: 'Failed to cache audio file' });
+        });
 
     } catch (error) {
-        console.error("Discord Guild Validation Error:", error.response?.data || error.message);
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Failed to validate Discord Guild ID with Discord API' 
-        });
+        console.error('[Cache Error]:', error.message);
+        return res.status(500).json({ success: false, message: 'Download failed', error: error.message });
     }
 });
 
-app.post('/auth/verify-token', (req, res) => {
-    const token = req.headers['x-token'] || req.headers['authorization']?.replace('Bearer ', '');
+app.get('/media/:id', (req, res) => {
+    const fileId = req.params.id;
+    const item = fileStore.get(fileId);
 
-    if (!token) {
-        return res.status(401).json({ success: false, error: 'Missing X-TOKEN header' });
+    if (!item || !fs.existsSync(item.filePath)) {
+        return res.status(404).send('Audio file expired or already deleted.');
     }
 
-    try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+    if (!item.isTimerStarted) {
+        item.isTimerStarted = true;
+        const deleteDelayMs = item.ttlSeconds * 1000;
 
-        const sessionToken = crypto.randomBytes(24).toString('hex');
+        console.log(`[Timer Started] GET request received for ${fileId}. File will auto-delete in ${item.ttlSeconds}s`);
 
-        activeSessions.set(sessionToken, {
-            guild_id: decoded.guild_id,
-            createdAt: Date.now(),
-            expiresAt: Date.now() + 60 * 60 * 1000 
-        });
-
-        return res.json({ 
-            success: true, 
-            sessionToken: sessionToken 
-        });
-
-    } catch (err) {
-        return res.status(403).json({ success: false, error: 'Invalid or expired JWT token' });
-    }
-});
-
-app.get('/media/:mediaId', (req, res) => {
-    const { mediaId } = req.params;
-    const sessionToken = req.query.session;
-
-    if (!sessionToken || !activeSessions.has(sessionToken)) {
-        return res.status(403).send('Forbidden: Invalid or missing Session Token');
-    }
-
-    const session = activeSessions.get(sessionToken);
-    if (Date.now() > session.expiresAt) {
-        activeSessions.delete(sessionToken);
-        return res.status(403).send('Forbidden: Session Token expired');
+        item.timeoutId = setTimeout(() => {
+            if (fs.existsSync(item.filePath)) {
+                fs.unlink(item.filePath, (err) => {
+                    if (!err) console.log(`[Auto Cleaned] File ${fileId}.mp3 deleted after ${item.ttlSeconds}s`);
+                });
+            }
+            fileStore.delete(fileId);
+        }, deleteDelayMs);
     }
 
     res.setHeader('Content-Type', 'audio/mpeg');
-    return res.send(`[Audio Stream Streamed Content for ${mediaId}]`);
+    fs.createReadStream(item.filePath).pipe(res);
 });
 
-app.listen(PORT, () => {
-    console.log(`DashCDN Server running on port ${PORT}`);
+app.delete('/media/:id', (req, res) => {
+    const fileId = req.params.id;
+    const item = fileStore.get(fileId);
+
+    if (item) {
+        if (item.timeoutId) clearTimeout(item.timeoutId);
+        if (fs.existsSync(item.filePath)) {
+            fs.unlink(item.filePath, () => {});
+        }
+        fileStore.delete(fileId);
+        console.log(`[Manual Delete] File ${fileId}.mp3 removed immediately.`);
+    }
+
+    return res.json({ success: true });
 });
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`CDN Gateway active on port ${PORT}`));
